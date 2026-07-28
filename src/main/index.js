@@ -13,6 +13,24 @@ import * as history from './history.js'
 
 let mainWindow = null
 
+// 是否为已打包的生产环境（开发期不做这些加固，保证可调试）
+const IS_PROD = app.isPackaged
+
+// 运行时加固：生产环境封死所有开发者工具入口，防止开控制台扒渲染层/注入
+function hardenWebContents(wc) {
+  if (!IS_PROD || !wc) return
+  // 屏蔽 F12 / Ctrl(⌘)+Shift+I|J|C 等唤起 DevTools 的快捷键
+  wc.on('before-input-event', (event, input) => {
+    const k = (input.key || '').toLowerCase()
+    const mod = input.control || input.meta
+    if (k === 'f12' || (mod && input.shift && ['i', 'j', 'c'].includes(k))) {
+      event.preventDefault()
+    }
+  })
+  // 兜底：万一 DevTools 被以其他方式打开，立即关掉
+  wc.on('devtools-opened', () => wc.closeDevTools())
+}
+
 // ---- Cookie 管理 ----
 function getCookie() {
   return store.get('pixivCookie', '')
@@ -110,9 +128,12 @@ function createMainWindow() {
     backgroundColor: '#14111c', // 无边框窗口首帧背景，避免白闪
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
-      sandbox: false
+      sandbox: false,
+      devTools: !IS_PROD // 生产禁用 DevTools
     }
   })
+
+  hardenWebContents(mainWindow.webContents)
 
   // 最大化/还原状态变化时通知渲染层，切换按钮图标
   mainWindow.on('maximize', () => {
@@ -158,8 +179,10 @@ function openLoginWindow() {
       modal: false,
       title: '登录 Pixiv',
       autoHideMenuBar: true,
-      webPreferences: { partition: 'persist:pixiv' }
+      webPreferences: { partition: 'persist:pixiv', devTools: !IS_PROD }
     })
+
+    hardenWebContents(loginWin.webContents)
 
     const sess = loginWin.webContents.session
     loginWin.loadURL('https://accounts.pixiv.net/login?lang=zh')
@@ -342,25 +365,50 @@ function registerIpc() {
   ipcMain.handle('win:isMaximized', () => !!(mainWindow && mainWindow.isMaximized()))
 }
 
-app.whenReady().then(() => {
-  // Windows 通知需要设置 AppUserModelID，否则通知标题会显示为 electron.exe
-  app.setAppUserModelId('com.qinye.pixivautotool')
-  // 应用已保存的代理与限速设置
-  applyProxy(store.get('proxyUrl', ''))
-  net.setRateLimit(store.get('speedLimit', 0))
-  installRefererInjection()
-  queue.init({
-    onUpdate: (state) => broadcast('queue:update', state),
-    onDone: notifyJobDone,
-    baseDirResolver: resolveBaseDir
+// 单例锁：拒绝多开（顺带提高被注入/挂调试器的门槛）；第二个实例唤起已有窗口
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
   })
-  registerIpc()
-  createMainWindow()
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow()
+  app.whenReady().then(() => {
+    // 生产环境：检测到调试类启动参数直接退出（与 fuses 双保险，堵住附加调试器）
+    if (IS_PROD) {
+      const debugging = process.argv.some((a) =>
+        /--inspect|--inspect-brk|--remote-debugging-port/.test(a)
+      )
+      if (debugging) {
+        app.quit()
+        return
+      }
+    }
+
+    // Windows 通知需要设置 AppUserModelID，否则通知标题会显示为 electron.exe
+    app.setAppUserModelId('com.qinye.pixivautotool')
+    // 应用已保存的代理与限速设置
+    applyProxy(store.get('proxyUrl', ''))
+    net.setRateLimit(store.get('speedLimit', 0))
+    installRefererInjection()
+    queue.init({
+      onUpdate: (state) => broadcast('queue:update', state),
+      onDone: notifyJobDone,
+      baseDirResolver: resolveBaseDir
+    })
+    registerIpc()
+    createMainWindow()
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createMainWindow()
+    })
   })
-})
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
