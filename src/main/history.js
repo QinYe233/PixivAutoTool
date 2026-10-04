@@ -2,6 +2,7 @@
 import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
+import { writeJsonAtomic } from './atomic-json.js'
 
 let filePath = null
 function file() {
@@ -18,7 +19,7 @@ function readAll() {
 }
 
 function writeAll(list) {
-  fs.writeFileSync(file(), JSON.stringify(list, null, 2), 'utf-8')
+  writeJsonAtomic(file(), list)
 }
 
 /**

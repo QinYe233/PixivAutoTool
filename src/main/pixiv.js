@@ -57,7 +57,10 @@ async function pixivFetch(url, options = {}, retries = 3) {
   let res
   for (let attempt = 0; ; attempt++) {
     await gate() // 全局节流：控制请求发起频率
-    res = await fetch(url, options)
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, AbortSignal.timeout(30000)])
+      : AbortSignal.timeout(30000)
+    res = await fetch(url, { ...options, signal })
     // 只对「限流 / 服务器繁忙」重试；其余状态（含 4xx 鉴权错误）直接返回给上层处理
     if (res.status !== 429 && res.status < 500) return res
     if (attempt >= retries) return res
@@ -79,8 +82,8 @@ async function pixivFetch(url, options = {}, retries = 3) {
   }
 }
 
-async function getJson(url, referer) {
-  const res = await pixivFetch(url, { headers: baseHeaders(referer) })
+async function getJson(url, referer, signal) {
+  const res = await pixivFetch(url, { headers: baseHeaders(referer), signal })
   if (res.status === 401 || res.status === 403) {
     throw new Error('未登录或登录已失效，请重新登录 Pixiv')
   }
@@ -383,10 +386,11 @@ export async function getBookmarkTags(userId, rest = 'show') {
  * 动图(ugoira)元信息。
  * 返回 { originalSrc(zip地址), mimeType, frames:[{file,delay}] }
  */
-export async function getUgoiraMeta(illustId) {
+export async function getUgoiraMeta(illustId, signal) {
   const body = await getJson(
     `https://www.pixiv.net/ajax/illust/${illustId}/ugoira_meta?lang=zh`,
-    `https://www.pixiv.net/artworks/${illustId}`
+    `https://www.pixiv.net/artworks/${illustId}`,
+    signal
   )
   return {
     originalSrc: body.originalSrc,
@@ -400,15 +404,17 @@ export async function getUgoiraMeta(illustId) {
  * 获取单个作品的所有原图 URL（多图作品会有多页）。
  * 返回 { id, title, userId, pages: [{ urlOriginal, urlRegular, width, height }] }
  */
-export async function getIllustPages(illustId) {
+export async function getIllustPages(illustId, signal) {
   // 先取作品详情拿标题/作者
   const detail = await getJson(
     `https://www.pixiv.net/ajax/illust/${illustId}?lang=zh`,
-    `https://www.pixiv.net/artworks/${illustId}`
+    `https://www.pixiv.net/artworks/${illustId}`,
+    signal
   )
   const pages = await getJson(
     `https://www.pixiv.net/ajax/illust/${illustId}/pages?lang=zh`,
-    `https://www.pixiv.net/artworks/${illustId}`
+    `https://www.pixiv.net/artworks/${illustId}`,
+    signal
   )
   return {
     id: String(illustId),

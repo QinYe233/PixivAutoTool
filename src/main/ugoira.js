@@ -12,6 +12,8 @@ const USER_AGENT =
   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 
 let cookieProvider = () => ''
+const MAX_ZIP_BYTES = 256 * 1024 * 1024
+const MAX_FRAME_BYTES = 512 * 1024 * 1024
 export function setCookieProvider(fn) {
   cookieProvider = fn
 }
@@ -20,8 +22,9 @@ function sanitize(name) {
   return String(name).replace(/[\\/:*?"<>|]/g, '_').trim() || 'untitled'
 }
 
-async function fetchBuffer(url) {
+async function fetchBuffer(url, signal) {
   const res = await fetch(url, {
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(300000)]) : AbortSignal.timeout(300000),
     headers: {
       'User-Agent': USER_AGENT,
       Referer: 'https://www.pixiv.net/',
@@ -29,7 +32,33 @@ async function fetchBuffer(url) {
     }
   })
   if (!res.ok) throw new Error(`下载失败 (${res.status}) ${url}`)
-  return Buffer.from(await res.arrayBuffer())
+  if (Number(res.headers?.get('content-length')) > MAX_ZIP_BYTES) {
+    await res.body?.cancel()
+    throw new Error('动图压缩包过大')
+  }
+  let buffer
+  if (res.body?.getReader) {
+    const reader = res.body.getReader()
+    const chunks = []
+    let size = 0
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        size += value.byteLength
+        if (size > MAX_ZIP_BYTES) throw new Error('动图压缩包过大')
+        chunks.push(Buffer.from(value))
+      }
+    } catch (e) {
+      await reader.cancel().catch(() => {})
+      throw e
+    }
+    buffer = Buffer.concat(chunks, size)
+  } else {
+    buffer = Buffer.from(await res.arrayBuffer())
+  }
+  if (buffer.length > MAX_ZIP_BYTES) throw new Error('动图压缩包过大')
+  return buffer
 }
 
 /**
@@ -45,21 +74,28 @@ export async function downloadUgoiraGif(illustId, destDir, opts = {}) {
     return { file: dest, skipped: true }
   }
 
-  const meta = await getUgoiraMeta(illustId)
+  const meta = await getUgoiraMeta(illustId, opts.signal)
   if (!meta.frames.length || !meta.originalSrc) {
     throw new Error('未获取到动图帧信息')
   }
 
   // 下载帧 zip 并解压到内存
-  const zipBuf = await fetchBuffer(meta.originalSrc)
+  const zipBuf = await fetchBuffer(meta.originalSrc, opts.signal)
   const zip = new AdmZip(zipBuf)
-  const fileMap = {}
+  const fileMap = new Map()
+  let expandedBytes = 0
   for (const entry of zip.getEntries()) {
-    fileMap[entry.entryName] = entry.getData()
+    expandedBytes += Number(entry.header?.size || 0)
+    if (expandedBytes > MAX_FRAME_BYTES) throw new Error('动图解压后过大')
+    fileMap.set(entry.entryName, entry)
+  }
+
+  for (const frame of meta.frames) {
+    if (!fileMap.has(frame.file)) throw new Error(`动图帧缺失: ${frame.file}`)
   }
 
   // 用第一帧确定尺寸
-  const firstBuf = fileMap[meta.frames[0].file]
+  const firstBuf = fileMap.get(meta.frames[0].file)?.getData()
   if (!firstBuf) throw new Error('动图帧缺失')
   const firstImg = await Jimp.read(firstBuf)
   const width = firstImg.bitmap.width
@@ -73,8 +109,9 @@ export async function downloadUgoiraGif(illustId, destDir, opts = {}) {
   const total = meta.frames.length
   for (let i = 0; i < total; i++) {
     const f = meta.frames[i]
-    const buf = fileMap[f.file]
-    if (!buf) continue
+    if (opts.signal?.aborted) throw opts.signal.reason || new Error('任务已取消')
+    const buf = i === 0 ? firstBuf : fileMap.get(f.file)?.getData()
+    if (!buf) throw new Error(`动图帧缺失: ${f.file}`)
     const img = i === 0 ? firstImg : await Jimp.read(buf)
     encoder.setDelay(f.delay || 100)
     encoder.addFrame(img.bitmap.data) // RGBA
@@ -83,6 +120,13 @@ export async function downloadUgoiraGif(illustId, destDir, opts = {}) {
   encoder.finish()
 
   await fs.promises.mkdir(destDir, { recursive: true })
-  await fs.promises.writeFile(dest, encoder.out.getData())
+  const part = `${dest}.part`
+  try {
+    await fs.promises.writeFile(part, encoder.out.getData())
+    await fs.promises.rename(part, dest)
+  } catch (e) {
+    await fs.promises.rm(part, { force: true }).catch(() => {})
+    throw e
+  }
   return { file: dest, frames: total }
 }

@@ -211,11 +211,12 @@ export default function App() {
       if (job.status === 'cancelled') return
       playChime()
       if (job.status === 'done') {
-        const failNote = job.failed ? `，失败 ${job.failed} 张` : ''
+        const failNote = `${job.failed ? `，下载失败 ${job.failed} 张` : ''}${job.resolveFail ? `，解析失败 ${job.resolveFail} 件` : ''}`
         const retryNote = job.retryable > 0 ? '　可在「📥 队列」里一键重试失败项。' : ''
         setStatus(
-          `✅ 「${job.label}」下载完成：成功 ${job.done}/${job.total} 张${failNote}` +
+          `${job.failed || job.resolveFail || job.warning ? '⚠️' : '✅'} 「${job.label}」下载结束：成功 ${job.done}/${job.total} 张${failNote}` +
             '。点右上角「📂 打开下载目录」查看。' +
+            (job.warning ? ` ${job.warning}` : '') +
             retryNote
         )
       } else if (job.status === 'error') {

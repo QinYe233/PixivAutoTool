@@ -42,18 +42,19 @@ export function getProxy() {
  */
 export async function testProxy() {
   const t0 = Date.now()
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 12000)
   try {
-    const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), 12000)
     const res = await fetch('https://www.pixiv.net/ajax/webpage/tags?lang=zh', {
       headers: { 'User-Agent': 'Mozilla/5.0' },
       signal: ctrl.signal
     })
-    clearTimeout(timer)
     // 能连通即算成功（即使 403/需登录，也说明代理通了 Pixiv）
     return { ok: true, ms: Date.now() - t0, status: res.status }
   } catch (e) {
     return { ok: false, ms: Date.now() - t0, message: String((e && e.message) || e) }
+  } finally {
+    clearTimeout(timer)
   }
 }
 

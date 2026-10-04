@@ -6,6 +6,7 @@
   "author": "",
   "license": "MIT",
   "scripts": {
+    "test": "node --experimental-vm-modules --test",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",

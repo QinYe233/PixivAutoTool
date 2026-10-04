@@ -5,6 +5,7 @@ import { runDownloadJob } from './job.js'
 let jobs = [] // 对外可见的任务快照数组
 const internal = new Map() // id -> { works, opts, retryWorks } （不外发，避免 IPC 传大对象）
 const cancelledIds = new Set() // 已请求取消的任务 id
+const controllers = new Map()
 let running = false
 let seq = 0
 let onUpdate = () => {}
@@ -37,13 +38,15 @@ export function enqueue(works, opts = {}, label = '') {
     itemIds: works.map((w) => String(w.id)),
     total: works.length,
     done: 0,
+    processed: 0,
     failed: 0,
     resolveFail: 0,
     retryable: 0, // 可一键重试的失败作品数（0 = 无失败或不可重试）
     phase: 'pending',
     current: '',
     baseDir,
-    error: ''
+    error: '',
+    warning: ''
   })
   internal.set(id, { works, opts: { ...opts, baseDir } })
   snapshot()
@@ -95,6 +98,7 @@ export function cancel(id) {
     snapshot()
   } else if (job.status === 'running') {
     cancelledIds.add(id)
+    controllers.get(id)?.abort(new Error('任务已取消'))
     job.phase = 'cancelling'
     job.current = '正在停止…'
     snapshot()
@@ -114,6 +118,8 @@ async function runNext() {
 
   const { works, opts } = internal.get(job.id) || { works: [], opts: {} }
   const shouldCancel = () => cancelledIds.has(job.id)
+  const controller = new AbortController()
+  controllers.set(job.id, controller)
   let jobErrors = [] // 本次任务的失败明细 [{ id, message }]，用于「一键重试」
   try {
     const result = await runDownloadJob(
@@ -124,28 +130,34 @@ async function runNext() {
         if (shouldCancel()) return
         job.phase = p.phase
         job.done = p.done
+        job.processed = p.processed ?? p.done
         job.total = p.total
         job.failed = p.failed
         job.current = p.current || ''
         snapshot()
       },
-      shouldCancel
+      shouldCancel,
+      controller.signal
     )
     jobErrors = result.errors || []
     if (shouldCancel()) {
       job.status = 'cancelled'
       job.phase = 'cancelled'
       job.done = result.done
+      job.processed = result.processed
       job.total = result.total
       job.failed = result.failed
       job.baseDir = result.baseDir
+      job.warning = result.warning || ''
       job.current = ''
     } else {
       job.status = 'done'
       job.total = result.total
       job.done = result.done
+      job.processed = result.processed
       job.failed = result.failed
       job.baseDir = result.baseDir
+      job.warning = result.warning || ''
       const errCount = (result.errors && result.errors.length) || 0
       job.resolveFail = Math.max(0, errCount - result.failed)
       job.current = ''
@@ -161,6 +173,7 @@ async function runNext() {
     }
   } finally {
     cancelledIds.delete(job.id)
+    controllers.delete(job.id)
     running = false
 
     // 计算可重试的作品并按需保留：

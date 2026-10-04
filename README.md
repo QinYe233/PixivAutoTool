@@ -1,113 +1,67 @@
-# Pixiv 批量下载工具 (PixivAutoTool)
+# PixivAutoTool
 
-一个基于 **Electron + React + Vite** 的桌面应用：搜索 Pixiv 作品、在线预览、批量下载原图到本地。
+基于 Electron、React 和 Vite 的 Pixiv 桌面下载工具。可搜索作者、关键词和作品，浏览排行榜及自己的收藏，预览作品并将原图下载到本地。动图会转换为 GIF。
 
-## 功能
+## 使用
 
-- 🔍 **六种入口**：作者名称 / 作者 ID / 关键字 / 作品 ID / **排行榜** / **我的收藏**
-  - 排行榜支持 日/周/月/新人/原创/男女性向 及各 R18 榜，内容可选 综合/插画/动图/漫画
-  - 收藏夹自动获取你自己的用户 ID，支持公开 / 不公开收藏
-- 👤 作者名搜索会列出候选作者，点击即可加载其全部作品
-- 🖼 **在线网格预览**（自动绕过 Pixiv 防盗链）
-- 🔞 **R18 过滤器**：全部 / 隐藏 R18 / 仅 R18 一键切换（切换后会自动补齐当前页数量）
-- 📥 **下载队列**：下载任务排队执行，下载过程中可继续搜索、勾选、追加新任务
-- 🎞 **动图(ugoira)自动转 GIF** 下载
-- ☑️ 多选勾选、全选/清空
-- ⬇️ **批量下载原图**（多图作品自动下载全部分页）
-- ⏯ **断点续传**：中断的文件用 `.part` 临时文件 + HTTP Range 续传，已存在文件自动跳过
-- 🕘 **下载历史记录**：记录每次下载，可回看、打开文件、清空
-- 📁 默认保存到 `图片/PixivAutoTool/<作者ID>/`，也可自选文件夹
-- 🔐 **一键登录**：弹出 Pixiv 官方登录窗口，登录后自动抓取 Cookie，无需手动复制
+1. 启动应用，点击右上角「登录 Pixiv」，在 Pixiv 登录窗口完成登录。
+2. 选择作者名称、作者 ID、关键词、作品 ID、排行榜或我的收藏，加载作品。
+3. 勾选作品并点击「下载所选」；作者页也可下载该作者的全部作品。
+4. 在「队列」查看进度、取消任务或重试失败作品；在「下载历史」查看已下载文件。
 
-## 目录结构
+默认保存位置为系统图片目录下的 `PixivAutoTool/<作者ID>/`。可在「设置」中更改下载目录、并发数、每页显示数量、HTTP 代理和全局下载限速。普通作品命名为 `<作品ID>_p<页码>.<扩展名>`，动图命名为 `<作品ID>.gif`。已有目标文件默认跳过；未完成的图片保留为 `.part`，下次尝试断点续传。
 
-```
-src/
-  main/            Electron 主进程（Node）
-    index.js       窗口/IPC/Referer 注入/登录窗口
-    pixiv.js       Pixiv AJAX API 客户端
-    downloader.js  并发批量下载器
-    store.js       本地配置存储
-  preload/
-    index.js       安全的 IPC 桥（contextBridge）
-  renderer/        React 前端
-    index.html
-    src/
-      App.jsx      主逻辑
-      api.js       调用主进程的封装
-      components/   TopBar / SearchBar / UserList / WorkGrid / DownloadBar
-      index.css
-```
+队列中的「成功」按图片页或 GIF 文件计数；解析失败按作品计数。取消任务后已经写入的文件会保留。重试失败项时，已有文件默认跳过。
 
-下载的文件命名：
-- 普通/多图作品：`<作品ID>_p<页码>.<扩展名>`，例如 `123456_p0.jpg`
-- 动图：`<作品ID>.gif`
+登录凭据保存在 Electron 用户数据目录。系统提供加密服务时，Cookie 加密后写入 `config.json`；不提供加密服务时，Cookie 仅在当前进程内保存，重启后需要重新登录。退出登录会清除应用保存的 Cookie 和专用 Pixiv 登录会话的 Cookie。`history.json` 保存下载历史。
 
-主进程新增模块：`job.js`（下载任务编排）、`ugoira.js`（动图转 GIF）、`history.js`（历史记录）。
+R18/R18G 的可见性取决于 Pixiv 账号的年龄和浏览设置。本工具的过滤器只处理账号已经能够获取的作品。
 
-## 开发运行
+## 开发
+
+需要 Node.js、npm 和可运行的 Electron 环境。在项目根目录执行：
 
 ```bash
 npm install
-npm run dev      # 启动开发模式（热更新）
+npm run dev
 ```
 
-## 打包成 exe
+验证与打包：
 
 ```bash
-npm run dist     # 生成安装包到 release/ 目录
-# 或
-npm run pack     # 仅生成免安装目录（release/win-unpacked/）
+npm test       # 本地回归测试
+npm run build  # 构建主进程、预加载脚本和前端
+npm run pack   # 生成 release/win-unpacked
+npm run dist   # 生成 Windows 安装包到 release/
 ```
 
-## 使用步骤
+`npm test` 使用 Node 的实验性 VM Modules，运行时可能显示实验特性警告。测试通过与否以命令退出码为准。打包脚本主要面向 Windows。
 
-1. 打开应用，点击右上角 **「登录 Pixiv」**，在弹窗中正常登录（程序自动保存登录态）
-2. 选择搜索类型，输入内容，点击 **搜索**
-3. 在网格中勾选想要的作品
-4. （可选）点击 **⚙ 设置** 选择下载目录、调整并发数
-5. 点击 **⬇ 下载所选**，完成后可点 **打开文件夹**
+### 代码结构
 
-## 常见问题 / 环境说明
+| 路径 | 职责 |
+| --- | --- |
+| `src/main/index.js` | Electron 窗口、IPC、登录、代理和通知 |
+| `src/main/auth.js`、`store.js` | Cookie 保管、配置持久化 |
+| `src/main/pixiv.js`、`net.js` | Pixiv API、请求节流、代理与下载限速 |
+| `src/main/queue.js`、`job.js` | 任务队列、作品解析和下载编排 |
+| `src/main/downloader.js`、`ugoira.js` | 图片续传、动图转 GIF |
+| `src/main/history.js` | 下载历史 |
+| `src/preload/index.js` | 前端可调用的 IPC 桥 |
+| `src/renderer/src/` | React 界面和组件 |
+| `tests/` | 本地回归测试 |
 
-- **首次安装 Electron 卡住 / `Error: Electron uninstall`**
-  Electron 二进制默认从 GitHub 下载，国内易失败。用国内镜像重装：
-  ```bash
-  # PowerShell
-  $env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
-  node node_modules/electron/install.js
-  ```
+### 常见问题
 
-- **`TypeError: Cannot read properties of undefined (reading 'whenReady')`**
-  说明环境里设置了 `ELECTRON_RUN_AS_NODE=1`（某些开发工具/终端会注入），
-  它会让 Electron 以纯 Node 模式启动。启动前清除该变量：
-  ```bash
-  # PowerShell
-  Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
-  npm run dev
-  ```
-  普通终端一般没有这个变量，可忽略。
+- 预览正常但下载失败：前端图片请求使用 Chromium 网络栈，下载使用 Node 网络栈。若网络需要代理，请在设置中填写 HTTP 代理（例如 `127.0.0.1:7890`）并测试连接。
+- Electron 安装卡住：在需要镜像的环境中可设置 `ELECTRON_MIRROR` 后重新安装 Electron。
+- 启动时出现 `whenReady` 未定义：检查环境变量 `ELECTRON_RUN_AS_NODE` 是否为 `1`；若是，请清除后再启动 Electron。
+- 图片无法预览：先确认登录和网络连接。原图站点需要正确的 Referer，应用会在图片请求中自动添加。
 
-- **图片预览不显示**：确认已登录；Pixiv 图片有防盗链，本工具已在主进程注入
-  `Referer` 头处理，若仍不显示多为网络问题（Pixiv 需科学上网）。
+## 使用范围
 
-## 关于 R18 / R18G 内容
+请遵守 Pixiv 用户协议与作者版权要求，仅下载你有权保存的内容。不要将本工具用于未经授权的传播或商业用途。
 
-**能否浏览与下载 R18 / R18G，完全取决于你登录的 Pixiv 账号本身的设置，本工具无法绕过。**
+## 后续改进
 
-要看到 R18 内容，登录账号必须满足：
-
-1. 账号出生日期为**成年**（满 18 岁）；
-2. 在 Pixiv 网页版 **设置 → 浏览限制** 中开启「显示 R-18 作品」（R-18G 为独立开关）。
-
-若账号未开启，Pixiv 服务端在响应中**就不会返回** R18 作品：R18 排行榜会报错或为空，
-搜索/作者页里的 R18 作品也会被服务端过滤掉。此时本工具里的「仅 R18 / 隐藏 R18」
-过滤器自然也筛不出内容。
-
-可在 **⚙ 设置 → 账号信息** 中查看当前账号是否具备 R18 / R18G 浏览权限（程序会实时探测）。
-
-## 免责声明
-
-本工具仅供个人学习与备份自己收藏的作品使用。请遵守 Pixiv 用户协议，
-尊重作者版权，不要用于商业用途或大规模抓取。R18 内容的可见性由用户自己的账号决定，
-使用者需自行确认已达法定年龄并对下载内容负责。
+已知风险、复现条件和功能建议见 [项目改进清单](docs/IMPROVEMENTS.md)。其中的条目来自代码审查，尚未全部经过真实 Pixiv 账号和大规模下载验证。

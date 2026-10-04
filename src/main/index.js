@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, session, dialog, Notification } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, session, dialog, Notification, safeStorage } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import * as store from './store.js'
@@ -8,10 +8,14 @@ import { setCookieProvider as setUgoiraCookie } from './ugoira.js'
 import * as net from './net.js'
 import * as queue from './queue.js'
 import * as history from './history.js'
+import { createCookieVault, createLoginCapture, logout } from './auth.js'
+import { isAllowedOpenPath } from './open-path.js'
+import { createDirectoryAuthorizer } from './directory-authorization.js'
 
 // electron-vite 将主进程打包为 CJS，__dirname 天然可用
 
 let mainWindow = null
+let directoryAuthorizer
 
 // 是否为已打包的生产环境（开发期不做这些加固，保证可调试）
 const IS_PROD = app.isPackaged
@@ -32,9 +36,8 @@ function hardenWebContents(wc) {
 }
 
 // ---- Cookie 管理 ----
-function getCookie() {
-  return store.get('pixivCookie', '')
-}
+const cookieVault = createCookieVault(store, safeStorage)
+const getCookie = () => cookieVault.getCookie()
 pixiv.setCookieProvider(getCookie)
 setDlCookie(getCookie)
 setUgoiraCookie(getCookie)
@@ -85,12 +88,12 @@ function notifyJobDone(job) {
   const focused = mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()
   if (focused) return // 前台时交给渲染层提示，不弹系统通知
 
-  const ok = job.status === 'done'
-  const failNote = job.failed ? `，失败 ${job.failed} 张` : ''
+  const ok = job.status === 'done' && !job.failed && !job.resolveFail && !job.warning
+  const failNote = `${job.failed ? `，下载失败 ${job.failed} 张` : ''}${job.resolveFail ? `，解析失败 ${job.resolveFail} 件` : ''}`
   const n = new Notification({
-    title: ok ? '✅ 下载完成' : '⚠️ 下载出错',
-    body: ok
-      ? `${job.label}｜成功 ${job.done}/${job.total} 张${failNote}`
+    title: ok ? '✅ 下载完成' : job.status === 'error' ? '⚠️ 下载出错' : '⚠️ 下载有失败项',
+    body: job.status === 'done'
+      ? `${job.label}｜成功 ${job.done}/${job.total} 张${failNote}${job.warning ? `；${job.warning}` : ''}`
       : `${job.label}｜${job.error || '任务出错'}`
   })
   n.on('click', () => {
@@ -187,31 +190,24 @@ function openLoginWindow() {
     const sess = loginWin.webContents.session
     loginWin.loadURL('https://accounts.pixiv.net/login?lang=zh')
 
-    let settled = false
-    async function tryCapture() {
-      if (settled) return
-      const { str, hasSession } = await readPixivCookieFromSession(sess)
-      // await 之后重新判断，避免定时器与导航事件并发时重复关闭窗口
-      if (settled || !hasSession) return
-      settled = true
-      store.set('pixivCookie', str)
-      resolve({ ok: true })
-      try {
-        loginWin.close()
-      } catch {
-        /* 窗口可能已在关闭 */
+    const capture = createLoginCapture(
+      () => readPixivCookieFromSession(sess),
+      (cookie) => cookieVault.setCookie(cookie),
+      (result) => {
+        resolve(result)
+        if (!loginWin.isDestroyed()) loginWin.close()
       }
-    }
+    )
 
     // 登录成功后会跳转，监听导航来探测
-    loginWin.webContents.on('did-navigate', tryCapture)
-    loginWin.webContents.on('did-navigate-in-page', tryCapture)
+    loginWin.webContents.on('did-navigate', capture.tryCapture)
+    loginWin.webContents.on('did-navigate-in-page', capture.tryCapture)
     // 每 2 秒兜底检查一次（cookie 可能在 XHR 后才写入）
-    const timer = setInterval(tryCapture, 2000)
+    const timer = setInterval(capture.tryCapture, 2000)
 
     loginWin.on('closed', () => {
       clearInterval(timer)
-      if (!settled) resolve({ ok: false, canceled: true })
+      capture.cancel()
     })
   })
 }
@@ -227,14 +223,14 @@ function registerIpc() {
     return { loggedIn }
   })
 
-  ipcMain.handle('auth:logout', () => {
-    store.set('pixivCookie', '')
+  ipcMain.handle('auth:logout', async () => {
+    await logout(cookieVault, session.fromPartition('persist:pixiv'))
     return { ok: true }
   })
 
   // 手动粘贴 Cookie（备用方式）
   ipcMain.handle('auth:setCookie', (_e, cookie) => {
-    store.set('pixivCookie', cookie)
+    cookieVault.setCookie(cookie)
     return { ok: true }
   })
 
@@ -266,6 +262,7 @@ function registerIpc() {
       properties: ['openDirectory', 'createDirectory']
     })
     if (r.canceled || !r.filePaths.length) return null
+    directoryAuthorizer.authorizeSelection(r.filePaths[0])
     return r.filePaths[0]
   })
 
@@ -278,7 +275,7 @@ function registerIpc() {
   }))
 
   ipcMain.handle('settings:set', (_e, s) => {
-    if (s.downloadDir !== undefined) store.set('downloadDir', s.downloadDir)
+    if (s.downloadDir !== undefined) store.set('downloadDir', directoryAuthorizer.saveDirectory(s.downloadDir))
     if (s.concurrency !== undefined) store.set('concurrency', s.concurrency)
     if (s.pageSize !== undefined) store.set('pageSize', s.pageSize)
     if (s.proxyUrl !== undefined) {
@@ -303,9 +300,10 @@ function registerIpc() {
   // works = [{ id, illustType, userId, title }]
   ipcMain.handle('download:enqueue', (_e, works, opts = {}) => {
     const concurrency = opts.concurrency || store.get('concurrency', 4)
+    const baseDir = directoryAuthorizer.resolveJobDir(opts.baseDir)
     return queue.enqueue(
       works,
-      { baseDir: opts.baseDir, concurrency, overwrite: opts.overwrite },
+      { baseDir, concurrency, overwrite: opts.overwrite },
       opts.label
     )
   })
@@ -317,7 +315,7 @@ function registerIpc() {
 
   // 打开当前下载根目录（不存在则先创建），供“常驻打开文件夹”按钮使用
   ipcMain.handle('shell:openDownloadDir', async () => {
-    const dir = resolveBaseDir()
+    const dir = directoryAuthorizer.resolveJobDir()
     try {
       await fs.promises.mkdir(dir, { recursive: true })
     } catch {
@@ -352,7 +350,12 @@ function registerIpc() {
     return { ok: true }
   })
 
-  ipcMain.handle('shell:openPath', (_e, p) => shell.openPath(p))
+  ipcMain.handle('shell:openPath', (_e, p) => {
+    if (!isAllowedOpenPath(p, queue.getState(), history.list(5000), resolveBaseDir())) {
+      throw new Error('不允许打开此路径')
+    }
+    return shell.openPath(p)
+  })
 
   // ---- 无边框窗口控制 ----
   ipcMain.handle('win:minimize', () => mainWindow && mainWindow.minimize())
@@ -395,6 +398,10 @@ if (!gotSingleInstanceLock) {
     // 应用已保存的代理与限速设置
     applyProxy(store.get('proxyUrl', ''))
     net.setRateLimit(store.get('speedLimit', 0))
+    directoryAuthorizer = createDirectoryAuthorizer(
+      path.join(app.getPath('pictures'), 'PixivAutoTool'),
+      store.get('downloadDir', '')
+    )
     installRefererInjection()
     queue.init({
       onUpdate: (state) => broadcast('queue:update', state),

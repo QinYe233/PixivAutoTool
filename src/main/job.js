@@ -9,15 +9,16 @@ import * as history from './history.js'
  * @param works [{ id, illustType, userId }]  用户勾选的作品
  * @param baseDir 保存根目录
  * @param opts { concurrency, overwrite }
- * @param onProgress (p) => void   p = { phase, done, total, failed, current }
- * 返回 { total, done, failed, errors, baseDir }
+ * @param onProgress (p) => void   p = { phase, done, processed, total, failed, current }
+ * 返回 { total, done(成功数), processed(已处理数), failed, errors, baseDir }
  */
 export async function runDownloadJob(
   works,
   baseDir,
   opts = {},
   onProgress = () => {},
-  shouldCancel = () => false
+  shouldCancel = () => false,
+  signal
 ) {
   const concurrency = opts.concurrency || 4
 
@@ -41,7 +42,7 @@ export async function runDownloadJob(
             title: w.title || ''
           })
         } else {
-          const info = await pixiv.getIllustPages(w.id)
+          const info = await pixiv.getIllustPages(w.id, signal)
           if (info.illustType === 2) {
             units.push({
               kind: 'ugoira',
@@ -80,12 +81,13 @@ export async function runDownloadJob(
 
   // 解析阶段被取消：直接返回，不进入下载
   if (shouldCancel()) {
-    return { total: 0, done: 0, failed: errors.length, errors, baseDir }
+    return { total: 0, done: 0, processed: 0, failed: errors.length, errors, baseDir }
   }
 
   // ---- 阶段二：并发下载所有单元 ----
   const total = units.length
   let done = 0
+  let processed = 0
   let failed = 0
   const succeeded = []
 
@@ -95,7 +97,7 @@ export async function runDownloadJob(
     return path.join(folder, `${u.illustId}_p${u.pageIndex}${ext}`)
   }
 
-  onProgress({ phase: 'download', done: 0, total, failed: 0, current: '开始下载…' })
+  onProgress({ phase: 'download', done: 0, processed: 0, total, failed: 0, current: '开始下载…' })
 
   await runPool(units, concurrency, async (u) => {
     try {
@@ -103,10 +105,12 @@ export async function runDownloadJob(
         const folder = path.join(baseDir, sanitize(u.userId || 'unknown'))
         const r = await downloadUgoiraGif(u.illustId, folder, {
           overwrite: opts.overwrite,
+          signal,
           onFrame: (f, t) =>
             onProgress({
               phase: 'download',
               done,
+              processed,
               total,
               failed,
               current: `动图 ${u.illustId} 转GIF ${f}/${t}`
@@ -121,7 +125,7 @@ export async function runDownloadJob(
         })
       } else {
         const dest = buildImageDest(u)
-        await downloadImage(u.url, dest, { overwrite: opts.overwrite })
+        await downloadImage(u.url, dest, { overwrite: opts.overwrite, signal })
         succeeded.push({
           illustId: u.illustId,
           userId: u.userId,
@@ -130,14 +134,16 @@ export async function runDownloadJob(
           kind: 'image'
         })
       }
+      done++
     } catch (e) {
       failed++
       errors.push({ id: u.illustId, message: e.message })
     } finally {
-      done++
+      processed++
       onProgress({
         phase: 'download',
         done,
+        processed,
         total,
         failed,
         current: u.kind === 'ugoira' ? `${u.illustId}.gif` : `${u.illustId}_p${u.pageIndex}`
@@ -146,13 +152,14 @@ export async function runDownloadJob(
   }, shouldCancel)
 
   // ---- 记录历史 ----
+  let warning = ''
   try {
     history.add(succeeded)
-  } catch {
-    /* ignore */
+  } catch (e) {
+    warning = `下载文件已保存，但历史记录写入失败：${e?.message || e}`
   }
 
-  return { total, done, failed, errors, baseDir }
+  return { total, done, processed, failed, errors, baseDir, warning }
 }
 
 /** 简单并发池：对 items 以最多 n 个并发跑 worker(item)。shouldStop() 为真时停止派发新任务 */

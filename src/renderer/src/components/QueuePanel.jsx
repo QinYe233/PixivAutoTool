@@ -9,7 +9,7 @@ const STATUS = {
 
 function pct(job) {
   if (!job.total) return 0
-  return Math.round((job.done / job.total) * 100)
+  return Math.round(((job.processed ?? job.done) / job.total) * 100)
 }
 
 export default function QueuePanel({ jobs, onClose, onClear, onOpenDir, onCancel, onRetry }) {
@@ -30,7 +30,9 @@ export default function QueuePanel({ jobs, onClose, onClear, onOpenDir, onCancel
         <div className="history-list">
           {jobs.length === 0 && <div className="empty">暂无下载任务</div>}
           {jobs.map((job) => {
-            const st = STATUS[job.status] || STATUS.pending
+            const st = job.status === 'done' && (job.failed || job.resolveFail)
+              ? { text: job.done > 0 ? '部分失败' : '下载失败', cls: 'q-error' }
+              : STATUS[job.status] || STATUS.pending
             return (
               <div className="queue-item" key={job.id}>
                 <div className="q-row">
@@ -56,6 +58,7 @@ export default function QueuePanel({ jobs, onClose, onClear, onOpenDir, onCancel
                   </div>
                 )}
                 {job.status === 'error' && <div className="q-err">下载失败：{job.error}</div>}
+                {job.warning && <div className="q-err">{job.warning}</div>}
                 {job.status === 'cancelled' && (
                   <div className="q-note">已取消（已下载 {job.done}/{job.total} 件保留在本地）</div>
                 )}

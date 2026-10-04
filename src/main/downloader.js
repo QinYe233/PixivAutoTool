@@ -46,6 +46,9 @@ async function ensureDir(dir) {
  * @returns 'downloaded' | 'skipped'
  */
 export async function downloadImage(url, destPath, opts = {}) {
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, AbortSignal.timeout(300000)])
+    : AbortSignal.timeout(300000)
   // 最终文件已存在 -> 跳过
   if (!opts.overwrite && fs.existsSync(destPath)) return 'skipped'
 
@@ -67,15 +70,30 @@ export async function downloadImage(url, destPath, opts = {}) {
     Referer: 'https://www.pixiv.net/',
     Cookie: cookieProvider() || ''
   }
-  if (start > 0) headers['Range'] = `bytes=${start}-`
-
-  const res = await fetch(url, { headers })
-
-  // 416：请求范围超出 -> .part 已是完整文件
-  if (res.status === 416) {
-    await fs.promises.rename(partPath, destPath)
-    return 'downloaded'
+  let res
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (start > 0) headers.Range = `bytes=${start}-`
+    else delete headers.Range
+    res = await fetch(url, { headers, signal })
+    const range = res.headers.get('content-range') || ''
+    const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(range)
+    const validPartial = match && Number(match[1]) === start &&
+      Number(match[2]) >= start &&
+      (match[3] === '*' || Number(match[3]) > Number(match[2]))
+    if (start > 0 && (res.status === 416 || (res.status === 206 && !validPartial))) {
+      // 远端文件可能已变化；旧分片不可信，丢弃后只重试一次完整下载。
+      await res.body?.cancel()
+      await fs.promises.rm(partPath, { force: true })
+      start = 0
+      continue
+    }
+    if (res.status === 206 && !validPartial) {
+      await res.body?.cancel()
+      throw new Error(`无效的续传响应: ${url}`)
+    }
+    break
   }
+  if (res.status === 416) throw new Error(`无效的续传响应 (416): ${url}`)
   if (!res.ok && res.status !== 206) {
     throw new Error(`下载失败 (${res.status}) ${url}`)
   }
@@ -89,7 +107,14 @@ export async function downloadImage(url, destPath, opts = {}) {
   const ws = fs.createWriteStream(partPath, { flags })
   // res.body 是 Web ReadableStream，显式转成 Node 流以兼容不同 Node 版本；
   // 中间串一个节流 Transform，实现全局下载限速（不限速时透明直通）。
-  await pipeline(Readable.fromWeb(res.body), createThrottleStream(), ws)
+  await pipeline(Readable.fromWeb(res.body), createThrottleStream(), ws, { signal })
+  const expected = res.status === 206
+    ? Number((res.headers.get('content-range') || '').split('/')[1])
+    : Number(res.headers.get('content-length'))
+  if (Number.isFinite(expected) && expected > 0) {
+    const actual = (await fs.promises.stat(partPath)).size
+    if (actual !== expected) throw new Error(`下载文件大小不符: ${url}`)
+  }
   await fs.promises.rename(partPath, destPath)
   return 'downloaded'
 }

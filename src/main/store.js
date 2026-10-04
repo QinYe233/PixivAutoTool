@@ -2,6 +2,7 @@
 import fs from 'fs'
 import path from 'path'
 import { app } from 'electron'
+import { writeJsonAtomic } from './atomic-json.js'
 
 let cache = null
 let filePath = null
@@ -27,7 +28,16 @@ export function get(key, def) {
 }
 
 export function set(key, value) {
-  const data = load()
+  const data = { ...load() }
   data[key] = value
-  fs.writeFileSync(file(), JSON.stringify(data, null, 2), 'utf-8')
+  writeJsonAtomic(file(), data)
+  cache = data
+}
+
+export function remove(key) {
+  const data = { ...load() }
+  if (!(key in data)) return
+  delete data[key]
+  writeJsonAtomic(file(), data)
+  cache = data
 }
